@@ -1786,9 +1786,18 @@ static void print_report(int is_last_report, int64_t timer_start, int64_t cur_ti
     if (bitrate < 0) {
         av_bprintf(&buf, "bitrate=N/A");
         av_bprintf(&buf_script, "bitrate=N/A\n");
-    }else{
+    } else {
         av_bprintf(&buf, "bitrate=%6.1fkbits/s", bitrate);
         av_bprintf(&buf_script, "bitrate=%6.1fkbits/s\n", bitrate);
+    }
+
+    for (i = 0; i < nb_input_streams; i++) {
+        InputStream *ist = input_streams[i];
+        if (!input_files[ist->file_index]->eof_reached &&
+                ist->dec_ctx->codec_id == AV_CODEC_ID_H264)
+        {
+            av_bprintf(&buf, " gop(%d)=%2i ", ist->file_index, ist->gop);
+        }
     }
 
     if (total_size < 0) av_bprintf(&buf_script, "total_size=N/A\n");
@@ -2236,7 +2245,7 @@ static int ifilter_send_eof(InputFilter *ifilter, int64_t pts)
 // There is the following difference: if you got a frame, you must call
 // it again with pkt=NULL. pkt==NULL is treated differently from pkt->size==0
 // (pkt==NULL means get more output, pkt->size==0 is a flush/drain packet)
-static int decode(AVCodecContext *avctx, AVFrame *frame, int *got_frame, AVPacket *pkt)
+static int decode(AVCodecContext *avctx, AVFrame *frame, int *got_frame, const AVPacket *pkt)
 {
     int ret;
 
@@ -2349,6 +2358,19 @@ static int decode_audio(InputStream *ist, AVPacket *pkt, int *got_output,
     return err < 0 ? err : ret;
 }
 
+static void count_gop(InputStream* ist, const AVFrame* frame) {
+    if (frame) {
+        if (frame->pict_type == AV_PICTURE_TYPE_I) {
+            ist->gop = ist->non_i_frames_decoded;
+            ist->non_i_frames_decoded = 1;
+        } else if(frame->pict_type == AV_PICTURE_TYPE_P || frame->pict_type == AV_PICTURE_TYPE_B) {
+            ist->non_i_frames_decoded++;
+        } else if (frame->pict_type > 0){
+            fprintf(stderr, "Non-usual type: %d\n", frame->pict_type);
+        }
+    }
+}
+
 static int decode_video(InputStream *ist, AVPacket *pkt, int *got_output, int64_t *duration_pts, int eof,
                         int *decode_failed)
 {
@@ -2431,6 +2453,9 @@ static int decode_video(InputStream *ist, AVPacket *pkt, int *got_output, int64_
         decoded_frame->top_field_first = ist->top_field_first;
 
     ist->frames_decoded++;
+    if (ist->dec_ctx->codec_id == AV_CODEC_ID_H264) {
+        count_gop(ist, decoded_frame);
+    }
 
     if (ist->hwaccel_retrieve_data && decoded_frame->format == ist->hwaccel_pix_fmt) {
         err = ist->hwaccel_retrieve_data(ist->dec_ctx, decoded_frame);
@@ -2572,6 +2597,49 @@ static int send_filter_eof(InputStream *ist)
             return ret;
     }
     return 0;
+}
+
+static int force_decode(InputStream* ist, const AVPacket* pkt, AVFrame** frame) {
+    AVCodecContext* avctx = NULL;
+    const AVCodec *codec = NULL;
+    int ret = 0;
+    int got_frame = 0;
+    codec = avcodec_find_decoder(AV_CODEC_ID_H264);
+    if (!codec) {
+        fprintf(stderr, "Codec not found\n");
+        return -1;
+    }
+
+    avctx = avcodec_alloc_context3(codec);
+    if (!avctx) {
+        fprintf(stderr, "Could not allocate video codec context\n");
+        avcodec_free_context(&avctx);
+        return -1;
+    }
+
+    /* open it */
+    if (avcodec_open2(ist->dec_ctx, ist->dec_ctx->codec, NULL) < 0) {
+        fprintf(stderr, "Could not open codec\n");
+        avcodec_free_context(&avctx);
+        return -1;
+    }
+
+    *frame = av_frame_alloc();
+    if (!*frame) {
+        fprintf(stderr, "Could not allocate video frame\n");
+        avcodec_free_context(&avctx);
+        return -1;
+    }
+
+    ret = decode(ist->dec_ctx, *frame, &got_frame, pkt);
+
+    if (ret < 0) {
+        fprintf(stderr, "Decoding failed\n");
+        ret = -1;
+    }
+
+    avcodec_free_context(&avctx);
+    return ret;
 }
 
 /* pkt = NULL means EOF (needed to flush decoder buffers) */
@@ -2750,6 +2818,14 @@ static int process_input_packet(InputStream *ist, const AVPacket *pkt, int no_eo
 
         if (!check_output_constraints(ist, ost) || ost->encoding_needed)
             continue;
+
+        if (ist->dec_ctx->codec_id == AV_CODEC_ID_H264) {
+            AVFrame* frame = NULL;
+            ret = force_decode(ist, pkt, &frame);
+            if (ret >= 0)
+                count_gop(ist, frame);
+            av_frame_free(&frame);
+        }
 
         do_streamcopy(ist, ost, pkt);
     }
@@ -2959,6 +3035,8 @@ static int init_input_stream(int ist_index, char *error, int error_len)
 
     ist->next_pts = AV_NOPTS_VALUE;
     ist->next_dts = AV_NOPTS_VALUE;
+    ist->gop = -1;
+    ist->non_i_frames_decoded = 0;
 
     return 0;
 }

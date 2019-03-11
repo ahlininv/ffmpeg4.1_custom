@@ -331,6 +331,8 @@ typedef struct InputStream {
     int saw_first_ts;
     AVDictionary *decoder_opts;
     AVRational framerate;               /* framerate forced with -r */
+    int gop;
+    int non_i_frames_decoded;
     int top_field_first;
     int guess_layout_max;
 
