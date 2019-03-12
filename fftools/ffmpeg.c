@@ -1793,11 +1793,8 @@ static void print_report(int is_last_report, int64_t timer_start, int64_t cur_ti
 
     for (i = 0; i < nb_input_streams; i++) {
         InputStream *ist = input_streams[i];
-        if (!input_files[ist->file_index]->eof_reached &&
-                ist->dec_ctx->codec_id == AV_CODEC_ID_H264)
-        {
+        if (ist->dec_ctx->codec_id == AV_CODEC_ID_H264)
             av_bprintf(&buf, " gop(%d)=%2i ", ist->file_index, ist->gop);
-        }
     }
 
     if (total_size < 0) av_bprintf(&buf_script, "total_size=N/A\n");
